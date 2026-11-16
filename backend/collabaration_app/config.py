@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
     jwt_secret: str
+    jwt_expire_minutes: int = 60
     cors_origins: str = "http://localhost:5173"
     livekit_api_key: str
     livekit_api_secret: str
