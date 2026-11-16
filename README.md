@@ -2,8 +2,6 @@
 
 React frontend, FastAPI backend, and a self-hosted open-source LiveKit server. PostgreSQL and Redis run in Docker Compose. Each app has its own `.env`, so the frontend and backend can also run on the host while Compose provides the infrastructure.
 
-LiveKit is a service in the root [docker-compose.yml](docker-compose.yml). [livekit/livekit.yaml](livekit/livekit.yaml) is that service's configuration file, not a second Compose file. The image is `livekit/livekit-server`. LiveKit Cloud is not used.
-
 Architecture notes live in [docs/README.md](docs/README.md).
 
 ## Layout
