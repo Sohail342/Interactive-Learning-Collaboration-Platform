@@ -1,0 +1,325 @@
+import "@livekit/components-styles";
+
+import {
+  LiveKitRoom,
+  RoomAudioRenderer,
+  VideoConference,
+  useConnectionState,
+  useLocalParticipant,
+  useRoomContext,
+} from "@livekit/components-react";
+import { ConnectionState, RoomEvent } from "livekit-client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+
+import { ApiError } from "../api/client";
+import { joinMeeting } from "../api/meetings";
+import type { JoinMeetingResponse } from "../api/types";
+import { useAuth } from "../auth/AuthContext";
+import {
+  clearMediaPreferences,
+  loadMediaPreferences,
+  saveMediaPreferences,
+  type MediaPreferences,
+} from "../meetings/mediaPreferences";
+
+const ACTIVE_MEETING_KEY = "lp_active_meeting";
+
+function ConnectionBanner() {
+  const state = useConnectionState();
+  if (state === ConnectionState.Connected) {
+    return null;
+  }
+  const label =
+    state === ConnectionState.Connecting
+      ? "Connecting to the meeting room…"
+      : state === ConnectionState.Reconnecting
+        ? "Reconnecting…"
+        : "Connection interrupted — retrying stays on this page until you leave";
+  return <div className="room-banner">{label}</div>;
+}
+
+function MediaPreferenceSync({
+  meetingId,
+  onChange,
+}: {
+  meetingId: string;
+  onChange: (prefs: MediaPreferences) => void;
+}) {
+  const room = useRoomContext();
+  const { localParticipant } = useLocalParticipant();
+
+  useEffect(() => {
+    const persist = () => {
+      const prefs: MediaPreferences = {
+        audio: localParticipant.isMicrophoneEnabled,
+        video: localParticipant.isCameraEnabled,
+      };
+      saveMediaPreferences(meetingId, prefs);
+      onChange(prefs);
+    };
+
+    persist();
+    room.on(RoomEvent.TrackMuted, persist);
+    room.on(RoomEvent.TrackUnmuted, persist);
+    room.on(RoomEvent.LocalTrackPublished, persist);
+    room.on(RoomEvent.LocalTrackUnpublished, persist);
+    room.on(RoomEvent.TrackSubscriptionStatusChanged, persist);
+
+    return () => {
+      room.off(RoomEvent.TrackMuted, persist);
+      room.off(RoomEvent.TrackUnmuted, persist);
+      room.off(RoomEvent.LocalTrackPublished, persist);
+      room.off(RoomEvent.LocalTrackUnpublished, persist);
+      room.off(RoomEvent.TrackSubscriptionStatusChanged, persist);
+    };
+  }, [localParticipant, meetingId, onChange, room]);
+
+  // Keep published tracks aligned if LiveKit reconnects with a different default.
+  useEffect(() => {
+    const prefs = loadMediaPreferences(meetingId);
+    void localParticipant.setMicrophoneEnabled(prefs.audio);
+    void localParticipant.setCameraEnabled(prefs.video);
+  }, [localParticipant, meetingId]);
+
+  return null;
+}
+
+function readRouteJoin(
+  meetingId: string | undefined,
+  state: unknown,
+): JoinMeetingResponse | null {
+  if (!meetingId || !state || typeof state !== "object") {
+    return null;
+  }
+  const join = state as JoinMeetingResponse;
+  if (!join.token || !join.url || !join.meeting || join.meeting.id !== meetingId) {
+    return null;
+  }
+  return join;
+}
+
+export function MeetingRoom() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, loading: authLoading } = useAuth();
+  const home = user?.role === "teacher" ? "/teacher" : "/student";
+
+  const [join, setJoin] = useState<JoinMeetingResponse | null>(() =>
+    readRouteJoin(id, location.state),
+  );
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [loadingSession, setLoadingSession] = useState(() => !readRouteJoin(id, location.state));
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectKey, setConnectKey] = useState(0);
+  const [mediaPrefs, setMediaPrefs] = useState<MediaPreferences>(() =>
+    id ? loadMediaPreferences(id) : { audio: true, video: true },
+  );
+  const leavingRef = useRef(false);
+  const hadMediaErrorRef = useRef(false);
+
+  useEffect(() => {
+    if (id) {
+      setMediaPrefs(loadMediaPreferences(id));
+    }
+  }, [id]);
+
+  const leaveMeeting = useCallback(() => {
+    leavingRef.current = true;
+    if (id) {
+      const active = sessionStorage.getItem(ACTIVE_MEETING_KEY);
+      if (active === id) {
+        sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+      }
+      clearMediaPreferences(id);
+    }
+    navigate(home, { replace: true });
+  }, [home, id, navigate]);
+
+  const restoreSession = useCallback(async () => {
+    if (!id) {
+      setSessionError("Meeting not found");
+      setLoadingSession(false);
+      return;
+    }
+
+    const fromRoute = readRouteJoin(id, location.state);
+    if (fromRoute) {
+      sessionStorage.setItem(ACTIVE_MEETING_KEY, id);
+      setMediaPrefs(loadMediaPreferences(id));
+      setJoin(fromRoute);
+      setSessionError(null);
+      setLoadingSession(false);
+      return;
+    }
+
+    setLoadingSession(true);
+    setSessionError(null);
+    try {
+      const restored = await joinMeeting(id);
+      sessionStorage.setItem(ACTIVE_MEETING_KEY, id);
+      setMediaPrefs(loadMediaPreferences(id));
+      setJoin(restored);
+      navigate(location.pathname, { replace: true, state: restored });
+    } catch (err) {
+      sessionStorage.removeItem(ACTIVE_MEETING_KEY);
+      setJoin(null);
+      setSessionError(
+        err instanceof ApiError ? err.message : "Could not restore the meeting session",
+      );
+    } finally {
+      setLoadingSession(false);
+    }
+  }, [id, location.pathname, location.state, navigate]);
+
+  useEffect(() => {
+    if (authLoading || !user || !id) {
+      return;
+    }
+    void restoreSession();
+  }, [authLoading, user, id, restoreSession]);
+
+  if (authLoading) {
+    return (
+      <div className="room-page">
+        <div className="room-loading">Loading your account…</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!id) {
+    return <Navigate to={home} replace />;
+  }
+
+  if (loadingSession) {
+    return (
+      <div className="room-page">
+        <header className="room-header">
+          <div>
+            <strong>Rejoining meeting</strong>
+            <div className="muted">ID {id}</div>
+          </div>
+          <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
+            Leave
+          </button>
+        </header>
+        <div className="room-loading">Restoring your meeting session…</div>
+      </div>
+    );
+  }
+
+  if (sessionError || !join) {
+    return (
+      <div className="room-page">
+        <header className="room-header">
+          <div>
+            <strong>Meeting unavailable</strong>
+            <div className="muted">ID {id}</div>
+          </div>
+          <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
+            Back
+          </button>
+        </header>
+        <div className="room-error">
+          <strong>You are no longer in this meeting</strong>
+          <p>{sessionError ?? "The meeting session could not be restored."}</p>
+          <p className="muted">
+            This usually means the meeting ended, has not started yet, or you are not allowed to
+            join.
+          </p>
+          <div className="meeting-meta" style={{ marginTop: "1rem" }}>
+            <button type="button" className="btn btn-blue" onClick={() => void restoreSession()}>
+              Try again
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={leaveMeeting}>
+              Return to workspace
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="room-page">
+      <header className="room-header">
+        <div>
+          <strong>{join.meeting.title}</strong>
+          <div className="muted">
+            Room {join.room_name} · ID {join.meeting.id}
+          </div>
+        </div>
+        <div className="meeting-meta">
+          {connectError ? (
+            <button
+              type="button"
+              className="btn btn-blue"
+              onClick={() => {
+                hadMediaErrorRef.current = false;
+                setConnectError(null);
+                setMediaPrefs(loadMediaPreferences(id));
+                setConnectKey((value) => value + 1);
+              }}
+            >
+              Retry connection
+            </button>
+          ) : null}
+          <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
+            Leave
+          </button>
+        </div>
+      </header>
+
+      {connectError ? (
+        <div className="room-error">
+          <strong>Could not connect to media</strong>
+          <p>{connectError}</p>
+          <p className="muted">
+            You are still in the meeting. Retry the connection, or leave when you are done.
+          </p>
+        </div>
+      ) : null}
+
+      <div className="room-stage" data-lk-theme="default">
+        <LiveKitRoom
+          key={`${join.token}-${connectKey}`}
+          token={join.token}
+          serverUrl={join.url}
+          connect
+          audio={mediaPrefs.audio}
+          video={mediaPrefs.video}
+          onConnected={() => {
+            hadMediaErrorRef.current = false;
+            setConnectError(null);
+          }}
+          onError={(error) => {
+            hadMediaErrorRef.current = true;
+            setConnectError(error.message || "LiveKit connection failed");
+          }}
+          onDisconnected={() => {
+            if (leavingRef.current) {
+              return;
+            }
+            if (!hadMediaErrorRef.current) {
+              setConnectError(
+                "Disconnected from media. Use Retry connection to rejoin audio/video.",
+              );
+              hadMediaErrorRef.current = true;
+            }
+          }}
+          className="room-livekit"
+        >
+          <ConnectionBanner />
+          <MediaPreferenceSync meetingId={id} onChange={setMediaPrefs} />
+          <RoomAudioRenderer />
+          <VideoConference />
+        </LiveKitRoom>
+      </div>
+    </div>
+  );
+}

@@ -1,3 +1,4 @@
+# Local Docker Desktop config
 port: 7880
 rtc:
   tcp_port: 7881
@@ -5,7 +6,13 @@ rtc:
   port_range_end: 50050
   use_external_ip: false
   node_ip: 127.0.0.1
+  # Prefer TCP ICE through the published 7881 mapping
+  force_tcp: true
 redis:
   address: redis:6379
 keys:
   devkey: secret
+room:
+  # Keep empty rooms around long enough for the host to press Start & join.
+  empty_timeout: 600
+  departure_timeout: 30

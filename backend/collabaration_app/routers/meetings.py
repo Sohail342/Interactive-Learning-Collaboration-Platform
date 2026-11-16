@@ -21,7 +21,7 @@ from collabaration_app.schemas.meeting import (
     JoinMeetingResponse,
     MeetingResponse,
 )
-from collabaration_app.services.livekit import create_join_token, create_room
+from collabaration_app.services.livekit import create_join_token, ensure_room
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
@@ -31,9 +31,36 @@ def _require_teacher(user: User) -> None:
         raise HTTPException(status_code=403, detail="Only teachers can create meetings")
 
 
-def _require_student(user: User) -> None:
-    if user.role != UserRole.student:
-        raise HTTPException(status_code=403, detail="Only students can join meetings")
+def _join_response(meeting: Meeting, user: User) -> JoinMeetingResponse:
+    return JoinMeetingResponse(
+        token=create_join_token(meeting.room_name, str(user.id), user.username),
+        url=settings.livekit_public_url,
+        room_name=meeting.room_name,
+        meeting=MeetingResponse.model_validate(meeting),
+    )
+
+
+async def _ensure_participant(
+    session: AsyncSession, meeting: Meeting, user: User
+) -> None:
+    participant = await get_open_participant(session, meeting.id, user.id)
+    if participant is None:
+        session.add(
+            MeetingParticipant(
+                meeting_id=meeting.id,
+                user_id=user.id,
+                livekit_sid=None,
+                is_muted=True,
+                is_video_off=True,
+            )
+        )
+
+
+async def _ensure_livekit_room(room_name: str) -> None:
+    try:
+        await ensure_room(room_name)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LiveKit is unavailable") from None
 
 
 @router.post("", response_model=MeetingResponse)
@@ -44,10 +71,8 @@ async def create_meeting(
 ) -> MeetingResponse:
     _require_teacher(current_user)
     room_name = f"meet-{uuid4().hex}"
-    try:
-        await create_room(room_name)
-    except Exception:
-        raise HTTPException(status_code=503, detail="LiveKit is unavailable") from None
+    # Persist first. The LiveKit room is created when the teacher starts,
+    # so an idle timeout cannot delete it before class begins.
     meeting = Meeting(
         room_name=room_name,
         title=body.title,
@@ -72,39 +97,67 @@ async def list_meetings(
     return [MeetingResponse.model_validate(row) for row in rows]
 
 
+@router.post("/{meeting_id}/start", response_model=MeetingResponse)
+async def start_meeting(
+    meeting_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> MeetingResponse:
+    _require_teacher(current_user)
+    meeting = await get_meeting(session, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.host_id != current_user.id:
+        raise HTTPException(
+            status_code=403, detail="Only the host can start this meeting"
+        )
+    if meeting.status == MeetingStatus.ended:
+        raise HTTPException(status_code=400, detail="Meeting has ended")
+
+    await _ensure_livekit_room(meeting.room_name)
+
+    if meeting.status == MeetingStatus.scheduled:
+        meeting.status = MeetingStatus.live
+        meeting.started_at = datetime.now(UTC)
+        await session.commit()
+        await session.refresh(meeting)
+    return MeetingResponse.model_validate(meeting)
+
+
 @router.post("/{meeting_id}/join", response_model=JoinMeetingResponse)
 async def join_meeting(
     meeting_id: UUID,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> JoinMeetingResponse:
-    _require_student(current_user)
     meeting = await get_meeting(session, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
     if meeting.status == MeetingStatus.ended:
         raise HTTPException(status_code=400, detail="Meeting has ended")
-    if meeting.started_at is None:
-        meeting.started_at = datetime.now(UTC)
-    meeting.status = MeetingStatus.live
-    participant = await get_open_participant(session, meeting.id, current_user.id)
-    if participant is None:
-        session.add(
-            MeetingParticipant(
-                meeting_id=meeting.id,
-                user_id=current_user.id,
-                livekit_sid=None,
-                is_muted=True,
-                is_video_off=True,
-            )
+
+    is_host = (
+        current_user.role == UserRole.teacher and meeting.host_id == current_user.id
+    )
+    is_student = current_user.role == UserRole.student
+
+    if not is_host and not is_student:
+        raise HTTPException(status_code=403, detail="Not allowed to join this meeting")
+
+    if is_student and meeting.status != MeetingStatus.live:
+        raise HTTPException(
+            status_code=400,
+            detail="Meeting has not started yet. Wait for the teacher to start it.",
         )
+
+    if is_host and meeting.status == MeetingStatus.scheduled:
+        raise HTTPException(
+            status_code=400,
+            detail="Start the meeting before joining.",
+        )
+
+    await _ensure_livekit_room(meeting.room_name)
+    await _ensure_participant(session, meeting, current_user)
     await session.commit()
     await session.refresh(meeting)
-    return JoinMeetingResponse(
-        token=create_join_token(
-            meeting.room_name, str(current_user.id), current_user.username
-        ),
-        url=settings.livekit_public_url,
-        room_name=meeting.room_name,
-        meeting=MeetingResponse.model_validate(meeting),
-    )
+    return _join_response(meeting, current_user)
