@@ -268,6 +268,34 @@ export function FilmstripShowIcon(props: IconProps) {
   );
 }
 
+export function EnterFullscreenIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M9 4H4.5V8.5M15 4h4.5V8.5M9 20H4.5V15.5M15 20h4.5V15.5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+export function ExitFullscreenIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M4.5 9H9V4.5M15 4.5V9h4.5M4.5 15H9v4.5M15 19.5V15h4.5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 export function ExpandPanelIcon(props: IconProps) {
   return (
     <Svg {...props}>

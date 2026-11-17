@@ -104,6 +104,20 @@ export function StudentHome() {
         <section className="panel-surface">
           <div className="section-head">
             <div>
+              <h2>Text to speech</h2>
+              <p className="lede">
+                Type text and hear it spoken with browser voices, or ElevenLabs when configured.
+              </p>
+            </div>
+            <button type="button" className="btn btn-blue" onClick={() => navigate("/tts")}>
+              Open TTS
+            </button>
+          </div>
+        </section>
+
+        <section className="panel-surface">
+          <div className="section-head">
+            <div>
               <h2>Join with meeting ID</h2>
               <p className="lede">Paste the ID your teacher shared if it is not in the list.</p>
             </div>

@@ -121,6 +121,7 @@ export function MeetingRoom() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatUnread, setChatUnread] = useState(0);
   const [shareFocus, setShareFocus] = useState(false);
+  const [boardFullscreen, setBoardFullscreen] = useState(false);
   const leavingRef = useRef(false);
   const hadMediaErrorRef = useRef(false);
 
@@ -142,9 +143,16 @@ export function MeetingRoom() {
     }
   }, [id]);
 
+  useEffect(() => {
+    if (!boardOpen) {
+      setBoardFullscreen(false);
+    }
+  }, [boardOpen]);
+
   const leaveMeeting = useCallback(() => {
     leavingRef.current = true;
     setChatOpen(false);
+    setBoardFullscreen(false);
     if (isHost && meetingIdForPresence) {
       void setHostBoardOpen(false);
     }
@@ -266,6 +274,7 @@ export function MeetingRoom() {
     "room-page",
     chatOpen ? "room-page-chat-open" : "",
     boardOpen ? "room-page-board-open" : "",
+    boardOpen && boardFullscreen ? "room-page-board-fullscreen" : "",
     shareFocus && !boardOpen ? "room-page-share-focus" : "",
   ]
     .filter(Boolean)
@@ -317,8 +326,13 @@ export function MeetingRoom() {
             meetingId={join.meeting.id}
             open={boardOpen}
             canEdit={isHost}
+            fullscreen={boardFullscreen}
+            onToggleFullscreen={() => {
+              setBoardFullscreen((value) => !value);
+            }}
             onClose={() => {
               if (isHost) {
+                setBoardFullscreen(false);
                 void setHostBoardOpen(false);
               }
             }}

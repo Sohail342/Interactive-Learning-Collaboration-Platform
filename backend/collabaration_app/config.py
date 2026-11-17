@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     livekit_api_secret: str
     livekit_public_url: str = "ws://localhost:7880"
     livekit_http_url: str = "http://localhost:7880"
+    elevenlabs_api_key: str | None = None
+    elevenlabs_api_base: str = "https://api.elevenlabs.io"
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE) if _ENV_FILE.is_file() else None,

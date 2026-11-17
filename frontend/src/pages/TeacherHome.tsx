@@ -87,8 +87,8 @@ export function TeacherHome() {
           <div>
             <h1>Good to see you, {user?.username}</h1>
             <p>
-              Create and run meetings for class. Sudoku is a separate practice activity — review
-              student performance reports below.
+              Create and run meetings for class. Use text to speech anytime, and review Sudoku
+              student reports below.
             </p>
           </div>
           <div className="profile-chips">
@@ -97,6 +97,20 @@ export function TeacherHome() {
               <span className="chip">{user.teacher.qualification}</span>
             ) : null}
             {user?.teacher?.city ? <span className="chip">{user.teacher.city}</span> : null}
+          </div>
+        </section>
+
+        <section className="panel-surface">
+          <div className="section-head">
+            <div>
+              <h2>Text to speech</h2>
+              <p className="lede">
+                Convert notes into spoken audio with browser voices, or ElevenLabs when configured.
+              </p>
+            </div>
+            <button type="button" className="btn btn-blue" onClick={() => navigate("/tts")}>
+              Open TTS
+            </button>
           </div>
         </section>
 

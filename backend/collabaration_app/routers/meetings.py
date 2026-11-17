@@ -1,99 +1,40 @@
-from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends
 
-from collabaration_app.config import settings
-from collabaration_app.database.session import get_session
 from collabaration_app.dependencies.auth import get_current_user
+from collabaration_app.dependencies.services import get_meeting_service
 from collabaration_app.models import User
-from collabaration_app.models.enums import MeetingStatus, UserRole
-from collabaration_app.models.meeting import Meeting, MeetingParticipant
-from collabaration_app.repositories.meeting import (
-    get_meeting,
-    get_open_participant,
-    list_hosted_meetings,
-    list_joinable_meetings,
-)
 from collabaration_app.schemas.meeting import (
     CreateMeetingRequest,
     JoinMeetingResponse,
     MeetingResponse,
 )
-from collabaration_app.services.livekit import create_join_token, ensure_room
+from collabaration_app.services.meeting import MeetingService
+from collabaration_app.services.meeting_access import (
+    MeetingAccessError,
+    raise_meeting_access_http,
+)
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
-
-
-def _require_teacher(user: User) -> None:
-    if user.role != UserRole.teacher:
-        raise HTTPException(status_code=403, detail="Only teachers can create meetings")
-
-
-def _join_response(meeting: Meeting, user: User) -> JoinMeetingResponse:
-    return JoinMeetingResponse(
-        token=create_join_token(meeting.room_name, str(user.id), user.username),
-        url=settings.livekit_public_url,
-        room_name=meeting.room_name,
-        meeting=MeetingResponse.model_validate(meeting),
-    )
-
-
-async def _ensure_participant(
-    session: AsyncSession, meeting: Meeting, user: User
-) -> None:
-    participant = await get_open_participant(session, meeting.id, user.id)
-    if participant is None:
-        session.add(
-            MeetingParticipant(
-                meeting_id=meeting.id,
-                user_id=user.id,
-                livekit_sid=None,
-                is_muted=True,
-                is_video_off=True,
-            )
-        )
-
-
-async def _ensure_livekit_room(room_name: str) -> None:
-    try:
-        await ensure_room(room_name)
-    except Exception:
-        raise HTTPException(status_code=503, detail="LiveKit is unavailable") from None
 
 
 @router.post("", response_model=MeetingResponse)
 async def create_meeting(
     body: CreateMeetingRequest,
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    meetings: MeetingService = Depends(get_meeting_service),
 ) -> MeetingResponse:
-    _require_teacher(current_user)
-    room_name = f"meet-{uuid4().hex}"
-    # Persist first. The LiveKit room is created when the teacher starts,
-    # so an idle timeout cannot delete it before class begins.
-    meeting = Meeting(
-        room_name=room_name,
-        title=body.title,
-        host_id=current_user.id,
-        status=MeetingStatus.scheduled,
-    )
-    session.add(meeting)
-    await session.commit()
-    await session.refresh(meeting)
+    meeting = await meetings.create(current_user, body.title)
     return MeetingResponse.model_validate(meeting)
 
 
 @router.get("", response_model=list[MeetingResponse])
 async def list_meetings(
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    meetings: MeetingService = Depends(get_meeting_service),
 ) -> list[MeetingResponse]:
-    if current_user.role == UserRole.teacher:
-        rows = await list_hosted_meetings(session, current_user.id)
-    else:
-        rows = await list_joinable_meetings(session)
+    rows = await meetings.list_for_user(current_user)
     return [MeetingResponse.model_validate(row) for row in rows]
 
 
@@ -101,26 +42,12 @@ async def list_meetings(
 async def start_meeting(
     meeting_id: UUID,
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    meetings: MeetingService = Depends(get_meeting_service),
 ) -> MeetingResponse:
-    _require_teacher(current_user)
-    meeting = await get_meeting(session, meeting_id)
-    if meeting is None:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.host_id != current_user.id:
-        raise HTTPException(
-            status_code=403, detail="Only the host can start this meeting"
-        )
-    if meeting.status == MeetingStatus.ended:
-        raise HTTPException(status_code=400, detail="Meeting has ended")
-
-    await _ensure_livekit_room(meeting.room_name)
-
-    if meeting.status == MeetingStatus.scheduled:
-        meeting.status = MeetingStatus.live
-        meeting.started_at = datetime.now(UTC)
-        await session.commit()
-        await session.refresh(meeting)
+    try:
+        meeting = await meetings.start(meeting_id, current_user)
+    except MeetingAccessError as exc:
+        raise_meeting_access_http(exc)
     return MeetingResponse.model_validate(meeting)
 
 
@@ -128,36 +55,9 @@ async def start_meeting(
 async def join_meeting(
     meeting_id: UUID,
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    meetings: MeetingService = Depends(get_meeting_service),
 ) -> JoinMeetingResponse:
-    meeting = await get_meeting(session, meeting_id)
-    if meeting is None:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.status == MeetingStatus.ended:
-        raise HTTPException(status_code=400, detail="Meeting has ended")
-
-    is_host = (
-        current_user.role == UserRole.teacher and meeting.host_id == current_user.id
-    )
-    is_student = current_user.role == UserRole.student
-
-    if not is_host and not is_student:
-        raise HTTPException(status_code=403, detail="Not allowed to join this meeting")
-
-    if is_student and meeting.status != MeetingStatus.live:
-        raise HTTPException(
-            status_code=400,
-            detail="Meeting has not started yet. Wait for the teacher to start it.",
-        )
-
-    if is_host and meeting.status == MeetingStatus.scheduled:
-        raise HTTPException(
-            status_code=400,
-            detail="Start the meeting before joining.",
-        )
-
-    await _ensure_livekit_room(meeting.room_name)
-    await _ensure_participant(session, meeting, current_user)
-    await session.commit()
-    await session.refresh(meeting)
-    return _join_response(meeting, current_user)
+    try:
+        return await meetings.join(meeting_id, current_user)
+    except MeetingAccessError as exc:
+        raise_meeting_access_http(exc)

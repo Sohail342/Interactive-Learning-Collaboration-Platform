@@ -15,12 +15,18 @@ import {
   type WhiteboardScenePayload,
 } from "../meetings/whiteboardSocket";
 import { IconButton } from "./meeting/IconButton";
-import { CloseIcon } from "./meeting/MeetingIcons";
+import {
+  CloseIcon,
+  EnterFullscreenIcon,
+  ExitFullscreenIcon,
+} from "./meeting/MeetingIcons";
 
 type WhiteboardPanelProps = {
   meetingId: string;
   open: boolean;
   canEdit: boolean;
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
   onClose: () => void;
 };
 
@@ -32,6 +38,8 @@ export function WhiteboardPanel({
   meetingId,
   open,
   canEdit,
+  fullscreen,
+  onToggleFullscreen,
   onClose,
 }: WhiteboardPanelProps) {
   const [role, setRole] = useState<WhiteboardRole>(canEdit ? "host" : "viewer");
@@ -180,16 +188,30 @@ export function WhiteboardPanel({
           <strong>Whiteboard</strong>
           {!editable ? <span className="muted">View only</span> : null}
         </div>
-        {editable ? (
+        <div className="wb-stage-actions">
           <IconButton
-            label="Close whiteboard"
+            label={fullscreen ? "Exit full screen" : "Full screen"}
             showLabel={false}
             className="wb-close-btn"
-            onClick={onClose}
+            onClick={onToggleFullscreen}
           >
-            <CloseIcon size={18} />
+            {fullscreen ? (
+              <ExitFullscreenIcon size={18} />
+            ) : (
+              <EnterFullscreenIcon size={18} />
+            )}
           </IconButton>
-        ) : null}
+          {editable ? (
+            <IconButton
+              label="Close whiteboard"
+              showLabel={false}
+              className="wb-close-btn"
+              onClick={onClose}
+            >
+              <CloseIcon size={18} />
+            </IconButton>
+          ) : null}
+        </div>
       </div>
 
       {error ? <div className="wb-panel-error">{error}</div> : null}

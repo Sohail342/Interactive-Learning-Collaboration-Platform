@@ -9,6 +9,7 @@ import { Register } from "./pages/Register";
 import { StudentHome } from "./pages/StudentHome";
 import { SudokuGame } from "./pages/SudokuGame";
 import { TeacherHome } from "./pages/TeacherHome";
+import { TextToSpeechPage } from "./pages/TextToSpeechPage";
 
 export function App() {
   return (
@@ -47,6 +48,14 @@ export function App() {
             element={
               <RequireAuth role="student">
                 <SudokuGame />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/tts"
+            element={
+              <RequireAuth>
+                <TextToSpeechPage />
               </RequireAuth>
             }
           />

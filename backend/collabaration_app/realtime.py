@@ -8,26 +8,25 @@ from uuid import UUID
 import jwt
 import redis.asyncio as redis
 import socketio
-from sqlalchemy import select
 
 from collabaration_app.config import settings
 from collabaration_app.database.session import async_session_factory
 from collabaration_app.models import User
-from collabaration_app.repositories.chat import create_message
+from collabaration_app.repositories.chat import ChatRepository
+from collabaration_app.repositories.meeting import MeetingRepository
+from collabaration_app.repositories.user import UserRepository
 from collabaration_app.repositories.whiteboard import (
     EMPTY_APP_STATE,
-    EMPTY_ELEMENTS,
-    get_by_meeting,
-    upsert_snapshot,
+    WhiteboardRepository,
+    normalize_scene,
 )
+from collabaration_app.security import decode_access_token
+from collabaration_app.services.chat import ChatService, chat_message_to_socket_payload
 from collabaration_app.services.meeting_access import (
     MeetingAccessError,
-    assert_can_chat,
-    assert_can_edit_whiteboard,
-    assert_can_use_whiteboard,
-    get_meeting_or_404,
-    whiteboard_role,
+    MeetingAccessService,
 )
+from collabaration_app.services.whiteboard import WhiteboardService
 
 MAX_CHAT_LENGTH = 2000
 WB_SCENE_TTL_SECONDS = 60 * 60 * 6
@@ -65,8 +64,21 @@ async def _get_redis() -> redis.Redis:
 
 async def _load_user(user_id: UUID) -> User | None:
     async with async_session_factory() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        return result.scalar_one_or_none()
+        return await UserRepository(session).get_by_id(user_id)
+
+
+def _chat_stack(session):
+    meetings = MeetingRepository(session)
+    access = MeetingAccessService(meetings)
+    chat = ChatRepository(session)
+    return ChatService(chat, access)
+
+
+def _whiteboard_stack(session):
+    meetings = MeetingRepository(session)
+    access = MeetingAccessService(meetings)
+    whiteboard = WhiteboardRepository(session)
+    return WhiteboardService(whiteboard, access), whiteboard
 
 
 async def _cache_scene(
@@ -90,11 +102,7 @@ async def _read_cached_scene(meeting_id: UUID) -> dict[str, Any] | None:
         return None
     elements = data.get("elements")
     app_state = data.get("appState") or data.get("app_state")
-    if not isinstance(elements, list):
-        elements = list(EMPTY_ELEMENTS)
-    if not isinstance(app_state, dict):
-        app_state = dict(EMPTY_APP_STATE)
-    return {"elements": elements, "appState": app_state}
+    return normalize_scene(elements, app_state)
 
 
 async def _load_scene_for_meeting(meeting_id: UUID) -> dict[str, Any]:
@@ -103,23 +111,7 @@ async def _load_scene_for_meeting(meeting_id: UUID) -> dict[str, Any]:
         return cached
 
     async with async_session_factory() as db:
-        snapshot = await get_by_meeting(db, meeting_id)
-        if snapshot is None:
-            scene = {
-                "elements": list(EMPTY_ELEMENTS),
-                "appState": dict(EMPTY_APP_STATE),
-            }
-        else:
-            elements = snapshot.elements_json
-            app_state = snapshot.app_state_json
-            scene = {
-                "elements": elements
-                if isinstance(elements, list)
-                else list(EMPTY_ELEMENTS),
-                "appState": (
-                    app_state if isinstance(app_state, dict) else dict(EMPTY_APP_STATE)
-                ),
-            }
+        scene = await WhiteboardRepository(db).scene_for_meeting(meeting_id)
     await _cache_scene(meeting_id, scene["elements"], scene["appState"])
     return scene
 
@@ -158,8 +150,8 @@ async def _persist_scene_later(
         try:
             await asyncio.sleep(WB_DB_DEBOUNCE_SECONDS)
             async with async_session_factory() as db:
-                await upsert_snapshot(
-                    db,
+                whiteboard = WhiteboardRepository(db)
+                await whiteboard.upsert_snapshot(
                     meeting_id=meeting_id,
                     elements=elements,
                     app_state=app_state,
@@ -169,7 +161,6 @@ async def _persist_scene_later(
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Live sync still works from Redis; persistence can retry on next update.
             return
         finally:
             current = _wb_persist_tasks.get(key)
@@ -187,7 +178,7 @@ async def connect(sid: str, environ: dict, auth: dict | None = None) -> bool:
     if not token:
         return False
     try:
-        payload = jwt.decode(str(token), settings.jwt_secret, algorithms=["HS256"])
+        payload = decode_access_token(str(token))
         user_id = UUID(str(payload["sub"]))
     except (jwt.PyJWTError, KeyError, ValueError, TypeError):
         return False
@@ -229,11 +220,12 @@ async def chat_join(sid: str, data: dict | None = None) -> dict:
 
     async with async_session_factory() as db:
         try:
-            user = await _load_user(UUID(user_id))
+            user = await UserRepository(db).get_by_id(UUID(user_id))
             if user is None:
                 return {"ok": False, "error": "Not authenticated"}
-            meeting = await get_meeting_or_404(db, meeting_id)
-            assert_can_chat(meeting, user)
+            access = MeetingAccessService(MeetingRepository(db))
+            meeting = await access.get_meeting_or_404(meeting_id)
+            access.assert_can_chat(meeting, user)
         except MeetingAccessError as exc:
             return {"ok": False, "error": exc.detail, "status": exc.status_code}
 
@@ -265,27 +257,19 @@ async def chat_msg(sid: str, data: dict | None = None) -> dict:
 
     async with async_session_factory() as db:
         try:
-            result = await db.execute(select(User).where(User.id == UUID(user_id)))
-            user = result.scalar_one_or_none()
+            user = await UserRepository(db).get_by_id(UUID(user_id))
             if user is None:
                 return {"ok": False, "error": "Not authenticated"}
-            meeting = await get_meeting_or_404(db, meeting_id)
-            assert_can_chat(meeting, user)
-            message = await create_message(
-                db,
+            chat = _chat_stack(db)
+            message = await chat.send_message(
                 meeting_id=meeting_id,
-                sender_id=user.id,
+                user=user,
                 content=content,
             )
             await db.commit()
-            payload = {
-                "id": str(message.id),
-                "meeting_id": str(meeting_id),
-                "sender_id": str(user.id),
-                "sender_name": user.username,
-                "content": message.content,
-                "sent_at": message.sent_at.isoformat(),
-            }
+            payload = chat_message_to_socket_payload(
+                message, meeting_id=meeting_id, sender_name=user.username
+            )
         except MeetingAccessError as exc:
             return {"ok": False, "error": exc.detail, "status": exc.status_code}
 
@@ -310,12 +294,11 @@ async def wb_join(sid: str, data: dict | None = None) -> dict:
 
     async with async_session_factory() as db:
         try:
-            user = await _load_user(UUID(user_id))
+            user = await UserRepository(db).get_by_id(UUID(user_id))
             if user is None:
                 return {"ok": False, "error": "Not authenticated"}
-            meeting = await get_meeting_or_404(db, meeting_id)
-            assert_can_use_whiteboard(meeting, user)
-            role = whiteboard_role(meeting, user)
+            whiteboard, _ = _whiteboard_stack(db)
+            role, _meeting = await whiteboard.assert_can_join(meeting_id, user)
         except MeetingAccessError as exc:
             return {"ok": False, "error": exc.detail, "status": exc.status_code}
 
@@ -351,11 +334,11 @@ async def wb_presence(sid: str, data: dict | None = None) -> dict:
 
     async with async_session_factory() as db:
         try:
-            user = await _load_user(UUID(user_id))
+            user = await UserRepository(db).get_by_id(UUID(user_id))
             if user is None:
                 return {"ok": False, "error": "Not authenticated"}
-            meeting = await get_meeting_or_404(db, meeting_id)
-            assert_can_edit_whiteboard(meeting, user)
+            whiteboard, _ = _whiteboard_stack(db)
+            await whiteboard.assert_can_edit(meeting_id, user)
         except MeetingAccessError as exc:
             return {"ok": False, "error": exc.detail, "status": exc.status_code}
 
@@ -394,11 +377,11 @@ async def scene_update(sid: str, data: dict | None = None) -> dict:
 
     async with async_session_factory() as db:
         try:
-            user = await _load_user(UUID(user_id))
+            user = await UserRepository(db).get_by_id(UUID(user_id))
             if user is None:
                 return {"ok": False, "error": "Not authenticated"}
-            meeting = await get_meeting_or_404(db, meeting_id)
-            assert_can_edit_whiteboard(meeting, user)
+            whiteboard, _ = _whiteboard_stack(db)
+            await whiteboard.assert_can_edit(meeting_id, user)
         except MeetingAccessError as exc:
             return {"ok": False, "error": exc.detail, "status": exc.status_code}
 
