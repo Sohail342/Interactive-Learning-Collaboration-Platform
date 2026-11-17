@@ -3,7 +3,6 @@ import "@livekit/components-styles";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
-  VideoConference,
   useConnectionState,
   useLocalParticipant,
   useRoomContext,
@@ -16,12 +15,16 @@ import { ApiError } from "../api/client";
 import { joinMeeting } from "../api/meetings";
 import type { JoinMeetingResponse } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
+import { ChatDrawer } from "../components/ChatDrawer";
+import { MeetingMedia } from "../components/MeetingMedia";
+import { WhiteboardPanel } from "../components/WhiteboardPanel";
 import {
   clearMediaPreferences,
   loadMediaPreferences,
   saveMediaPreferences,
   type MediaPreferences,
 } from "../meetings/mediaPreferences";
+import { useWhiteboardPresence } from "../meetings/useWhiteboardPresence";
 
 const ACTIVE_MEETING_KEY = "lp_active_meeting";
 
@@ -32,10 +35,10 @@ function ConnectionBanner() {
   }
   const label =
     state === ConnectionState.Connecting
-      ? "Connecting to the meeting room…"
+      ? "Connecting…"
       : state === ConnectionState.Reconnecting
         ? "Reconnecting…"
-        : "Connection interrupted — retrying stays on this page until you leave";
+        : "Connection interrupted";
   return <div className="room-banner">{label}</div>;
 }
 
@@ -75,7 +78,6 @@ function MediaPreferenceSync({
     };
   }, [localParticipant, meetingId, onChange, room]);
 
-  // Keep published tracks aligned if LiveKit reconnects with a different default.
   useEffect(() => {
     const prefs = loadMediaPreferences(meetingId);
     void localParticipant.setMicrophoneEnabled(prefs.audio);
@@ -116,8 +118,23 @@ export function MeetingRoom() {
   const [mediaPrefs, setMediaPrefs] = useState<MediaPreferences>(() =>
     id ? loadMediaPreferences(id) : { audio: true, video: true },
   );
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [shareFocus, setShareFocus] = useState(false);
   const leavingRef = useRef(false);
   const hadMediaErrorRef = useRef(false);
+
+  const isHost =
+    !!user &&
+    !!join &&
+    user.role === "teacher" &&
+    join.meeting.host_id === user.id;
+
+  const meetingIdForPresence = join?.meeting.id ?? "";
+  const { boardOpen, setHostBoardOpen } = useWhiteboardPresence(
+    meetingIdForPresence,
+    isHost,
+  );
 
   useEffect(() => {
     if (id) {
@@ -127,6 +144,10 @@ export function MeetingRoom() {
 
   const leaveMeeting = useCallback(() => {
     leavingRef.current = true;
+    setChatOpen(false);
+    if (isHost && meetingIdForPresence) {
+      void setHostBoardOpen(false);
+    }
     if (id) {
       const active = sessionStorage.getItem(ACTIVE_MEETING_KEY);
       if (active === id) {
@@ -135,7 +156,7 @@ export function MeetingRoom() {
       clearMediaPreferences(id);
     }
     navigate(home, { replace: true });
-  }, [home, id, navigate]);
+  }, [home, id, isHost, meetingIdForPresence, navigate, setHostBoardOpen]);
 
   const restoreSession = useCallback(async () => {
     if (!id) {
@@ -199,10 +220,9 @@ export function MeetingRoom() {
   if (loadingSession) {
     return (
       <div className="room-page">
-        <header className="room-header">
+        <header className="room-header room-header-slim">
           <div>
             <strong>Rejoining meeting</strong>
-            <div className="muted">ID {id}</div>
           </div>
           <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
             Leave
@@ -216,10 +236,9 @@ export function MeetingRoom() {
   if (sessionError || !join) {
     return (
       <div className="room-page">
-        <header className="room-header">
+        <header className="room-header room-header-slim">
           <div>
             <strong>Meeting unavailable</strong>
-            <div className="muted">ID {id}</div>
           </div>
           <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
             Back
@@ -228,10 +247,6 @@ export function MeetingRoom() {
         <div className="room-error">
           <strong>You are no longer in this meeting</strong>
           <p>{sessionError ?? "The meeting session could not be restored."}</p>
-          <p className="muted">
-            This usually means the meeting ended, has not started yet, or you are not allowed to
-            join.
-          </p>
           <div className="meeting-meta" style={{ marginTop: "1rem" }}>
             <button type="button" className="btn btn-blue" onClick={() => void restoreSession()}>
               Try again
@@ -245,81 +260,134 @@ export function MeetingRoom() {
     );
   }
 
+  // Whiteboard takes visual priority over screen-share focus layout.
+  // Share can keep publishing in the video dock while the board is open.
+  const pageClass = [
+    "room-page",
+    chatOpen ? "room-page-chat-open" : "",
+    boardOpen ? "room-page-board-open" : "",
+    shareFocus && !boardOpen ? "room-page-share-focus" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const statusLabel = boardOpen
+    ? isHost
+      ? "Whiteboard"
+      : "Whiteboard live"
+    : shareFocus
+      ? "Screen share"
+      : null;
+
   return (
-    <div className="room-page">
-      <header className="room-header">
-        <div>
-          <strong>{join.meeting.title}</strong>
-          <div className="muted">
-            Room {join.room_name} · ID {join.meeting.id}
+    <div className={pageClass}>
+      <div className="room-main">
+        <header className="room-header room-header-slim">
+          <div className="room-header-title">
+            <strong>{join.meeting.title}</strong>
+            {statusLabel ? <span className="room-status-pill">{statusLabel}</span> : null}
           </div>
-        </div>
-        <div className="meeting-meta">
-          {connectError ? (
-            <button
-              type="button"
-              className="btn btn-blue"
-              onClick={() => {
+          <div className="meeting-meta">
+            {connectError ? (
+              <button
+                type="button"
+                className="btn btn-blue"
+                onClick={() => {
+                  hadMediaErrorRef.current = false;
+                  setConnectError(null);
+                  setMediaPrefs(loadMediaPreferences(id));
+                  setConnectKey((value) => value + 1);
+                }}
+              >
+                Retry
+              </button>
+            ) : null}
+          </div>
+        </header>
+
+        {connectError ? (
+          <div className="room-error">
+            <strong>Could not connect to media</strong>
+            <p>{connectError}</p>
+          </div>
+        ) : null}
+
+        <div className="room-workspace">
+          <WhiteboardPanel
+            meetingId={join.meeting.id}
+            open={boardOpen}
+            canEdit={isHost}
+            onClose={() => {
+              if (isHost) {
+                void setHostBoardOpen(false);
+              }
+            }}
+          />
+
+          <div className="room-stage" data-lk-theme="default">
+            <LiveKitRoom
+              key={`${join.token}-${connectKey}`}
+              token={join.token}
+              serverUrl={join.url}
+              connect
+              audio={mediaPrefs.audio}
+              video={mediaPrefs.video}
+              onConnected={() => {
                 hadMediaErrorRef.current = false;
                 setConnectError(null);
-                setMediaPrefs(loadMediaPreferences(id));
-                setConnectKey((value) => value + 1);
               }}
+              onError={(error) => {
+                hadMediaErrorRef.current = true;
+                setConnectError(error.message || "LiveKit connection failed");
+              }}
+              onDisconnected={() => {
+                if (leavingRef.current) {
+                  return;
+                }
+                if (!hadMediaErrorRef.current) {
+                  setConnectError(
+                    "Disconnected from media. Use Retry to rejoin audio/video.",
+                  );
+                  hadMediaErrorRef.current = true;
+                }
+              }}
+              className="room-livekit"
             >
-              Retry connection
-            </button>
-          ) : null}
-          <button type="button" className="btn btn-charcoal" onClick={leaveMeeting}>
-            Leave
-          </button>
+              <ConnectionBanner />
+              <MediaPreferenceSync meetingId={id} onChange={setMediaPrefs} />
+              <RoomAudioRenderer />
+              <MeetingMedia
+                allowScreenShare={isHost}
+                allowWhiteboard={isHost}
+                boardOpen={boardOpen}
+                chatOpen={chatOpen}
+                chatUnread={chatUnread}
+                onToggleWhiteboard={() => {
+                  const next = !boardOpen;
+                  if (next) {
+                    setChatOpen(false);
+                  }
+                  void setHostBoardOpen(next);
+                }}
+                onToggleChat={() => {
+                  setChatOpen((value) => !value);
+                }}
+                onLeave={leaveMeeting}
+                onShareFocusChange={setShareFocus}
+              />
+            </LiveKitRoom>
+          </div>
         </div>
-      </header>
-
-      {connectError ? (
-        <div className="room-error">
-          <strong>Could not connect to media</strong>
-          <p>{connectError}</p>
-          <p className="muted">
-            You are still in the meeting. Retry the connection, or leave when you are done.
-          </p>
-        </div>
-      ) : null}
-
-      <div className="room-stage" data-lk-theme="default">
-        <LiveKitRoom
-          key={`${join.token}-${connectKey}`}
-          token={join.token}
-          serverUrl={join.url}
-          connect
-          audio={mediaPrefs.audio}
-          video={mediaPrefs.video}
-          onConnected={() => {
-            hadMediaErrorRef.current = false;
-            setConnectError(null);
-          }}
-          onError={(error) => {
-            hadMediaErrorRef.current = true;
-            setConnectError(error.message || "LiveKit connection failed");
-          }}
-          onDisconnected={() => {
-            if (leavingRef.current) {
-              return;
-            }
-            if (!hadMediaErrorRef.current) {
-              setConnectError(
-                "Disconnected from media. Use Retry connection to rejoin audio/video.",
-              );
-              hadMediaErrorRef.current = true;
-            }
-          }}
-          className="room-livekit"
-        >
-          <ConnectionBanner />
-          <MediaPreferenceSync meetingId={id} onChange={setMediaPrefs} />
-          <RoomAudioRenderer />
-          <VideoConference />
-        </LiveKitRoom>
       </div>
+
+      <ChatDrawer
+        meetingId={join.meeting.id}
+        currentUserId={user.id}
+        open={chatOpen}
+        onOpenChange={setChatOpen}
+        showFab={false}
+        onUnreadChange={setChatUnread}
+      />
     </div>
   );
 }

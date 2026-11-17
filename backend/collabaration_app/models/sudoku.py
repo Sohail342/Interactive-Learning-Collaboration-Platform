@@ -16,7 +16,9 @@ class SudokuReport(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     student_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    meeting_id: Mapped[UUID] = mapped_column(ForeignKey("meetings.id"), nullable=False)
+    meeting_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("meetings.id"), nullable=True
+    )
     difficulty: Mapped[str] = mapped_column(String(20), nullable=False)
     time_limit_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     completion_time_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

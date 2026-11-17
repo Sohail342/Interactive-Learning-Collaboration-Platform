@@ -3,9 +3,11 @@ import { useNavigate } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import { createMeeting, joinMeeting, listMeetings, startMeeting } from "../api/meetings";
-import type { Meeting } from "../api/types";
+import { listAllReports } from "../api/reports";
+import type { Meeting, SudokuReport } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Shell } from "../components/Shell";
+import { SudokuReportView } from "../components/SudokuReportView";
 
 function formatWhen(value: string | null): string {
   if (!value) {
@@ -21,11 +23,13 @@ export function TeacherHome() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [reports, setReports] = useState<SudokuReport[]>([]);
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectedReport, setSelectedReport] = useState<SudokuReport | null>(null);
 
   async function refreshMeetings() {
     const rows = await listMeetings();
@@ -33,9 +37,13 @@ export function TeacherHome() {
   }
 
   useEffect(() => {
-    void refreshMeetings()
+    void Promise.all([listMeetings(), listAllReports()])
+      .then(([meetingRows, reportRows]) => {
+        setMeetings(meetingRows);
+        setReports(reportRows);
+      })
       .catch((err) =>
-        setError(err instanceof ApiError ? err.message : "Could not load meetings"),
+        setError(err instanceof ApiError ? err.message : "Could not load dashboard"),
       )
       .finally(() => setLoading(false));
   }, []);
@@ -79,8 +87,8 @@ export function TeacherHome() {
           <div>
             <h1>Good to see you, {user?.username}</h1>
             <p>
-              Create a meeting, share the ID, then start it when you are ready. Students can join
-              only after you start.
+              Create and run meetings for class. Sudoku is a separate practice activity — review
+              student performance reports below.
             </p>
           </div>
           <div className="profile-chips">
@@ -183,7 +191,66 @@ export function TeacherHome() {
             })}
           </div>
         </section>
+
+        <section className="panel-surface">
+          <div className="section-head">
+            <div>
+              <h2>Student game reports</h2>
+              <p className="lede">Timed Sudoku results from students (separate from meetings).</p>
+            </div>
+            <span className="muted">{reports.length} saved</span>
+          </div>
+          {!loading && reports.length === 0 ? (
+            <div className="empty-state">
+              <strong>No reports yet</strong>
+              <span className="muted">Students have not finished a Sudoku game yet.</span>
+            </div>
+          ) : null}
+          <div className="meeting-list">
+            {reports.map((report) => (
+              <article key={report.id} className="meeting-item">
+                <div>
+                  <h3>{report.student_name}</h3>
+                  <div className="meeting-meta">
+                    <span className={`status-pill ${report.status}`}>{report.status}</span>
+                    <span className="muted">{report.difficulty}</span>
+                    <span className="muted">Score {Number(report.final_score).toFixed(2)}</span>
+                    <span className="muted">{formatWhen(report.completed_at)}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setSelectedReport(report)}
+                >
+                  View report
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
       </main>
+
+      {selectedReport ? (
+        <div className="report-modal-backdrop" onClick={() => setSelectedReport(null)}>
+          <div
+            className="report-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sudoku performance report"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <SudokuReportView report={selectedReport} />
+            <button
+              type="button"
+              className="btn btn-charcoal"
+              onClick={() => setSelectedReport(null)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
     </Shell>
   );
 }

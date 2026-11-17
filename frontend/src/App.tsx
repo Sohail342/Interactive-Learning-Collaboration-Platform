@@ -7,6 +7,7 @@ import { Login } from "./pages/Login";
 import { MeetingRoom } from "./pages/MeetingRoom";
 import { Register } from "./pages/Register";
 import { StudentHome } from "./pages/StudentHome";
+import { SudokuGame } from "./pages/SudokuGame";
 import { TeacherHome } from "./pages/TeacherHome";
 
 export function App() {
@@ -38,6 +39,14 @@ export function App() {
             element={
               <RequireAuth>
                 <MeetingRoom />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/sudoku"
+            element={
+              <RequireAuth role="student">
+                <SudokuGame />
               </RequireAuth>
             }
           />

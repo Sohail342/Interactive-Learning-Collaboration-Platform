@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, ForeignKey, func
@@ -19,8 +20,8 @@ class WhiteboardSnapshot(Base):
         unique=True,
         nullable=False,
     )
-    elements_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    app_state_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    elements_json: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    app_state_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     last_modified_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
