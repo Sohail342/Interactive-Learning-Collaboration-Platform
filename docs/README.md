@@ -39,7 +39,7 @@ Two roles exist: **Student** and **Teacher**. The interface and the permissions 
 
 ## Data model
 
-![Database schema for users, meetings, chat, Sudoku reports, and whiteboard snapshots](./db_schema.png)
+![Database schema for cities, schools, users, student and teacher profiles, meetings, chat, Sudoku reports, and whiteboard snapshots](./db_schema.png)
 
 Primary keys are UUIDs. PostgreSQL holds the durable rows. Redis holds Socket.IO traffic, the live whiteboard, and presence, and those keys are not tables in this schema.
 
@@ -49,6 +49,25 @@ Enum **type names** on the diagram are `user_role`, `meeting_status`, and `game_
 - `game_status`: `completed`, `abandoned`, `timed_out`
 
 `NN` in the tables below means the diagram marks the column not null. Columns without that mark are nullable on the diagram.
+
+Lookup tables (`cities`, `schools`) feed registration. Role profile tables (`students`, `teachers`) extend `users` one-to-one.
+
+### `cities`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid | Primary key |
+| `name` | varchar(100) | NN, unique |
+
+### `schools`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid | Primary key |
+| `name` | varchar(150) | NN |
+| `city_id` | uuid | NN, foreign key to `cities` |
+
+Unique constraint `uq_schools_name_city` on `(name, city_id)`.
 
 ### `users`
 
@@ -61,6 +80,27 @@ Enum **type names** on the diagram are `user_role`, `meeting_status`, and `game_
 | `role` | `user_role` | NN. `student` or `teacher` |
 | `created_at` | timestamptz | NN |
 | `updated_at` | timestamptz | |
+
+### `students`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid | Primary key |
+| `user_id` | uuid | NN, unique, foreign key to `users`. One profile per user |
+| `class_name` | varchar(50) | NN |
+| `date_of_birth` | date | NN |
+| `city_id` | uuid | NN, foreign key to `cities` |
+| `school_id` | uuid | NN, foreign key to `schools` |
+
+### `teachers`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | uuid | Primary key |
+| `user_id` | uuid | NN, unique, foreign key to `users`. One profile per user |
+| `qualification` | varchar(255) | NN |
+| `city_id` | uuid | NN, foreign key to `cities` |
+| `experience_years` | int | NN |
 
 ### `meetings`
 
@@ -104,7 +144,7 @@ Enum **type names** on the diagram are `user_role`, `meeting_status`, and `game_
 | --- | --- | --- |
 | `id` | uuid | Primary key |
 | `student_id` | uuid | NN, foreign key to `users` |
-| `meeting_id` | uuid | NN, foreign key to `meetings` |
+| `meeting_id` | uuid | Foreign key to `meetings`. Optional when the game is not tied to a live meeting |
 | `difficulty` | varchar(20) | NN |
 | `time_limit_seconds` | int | NN |
 | `completion_time_seconds` | int | NN. Total completion time |
